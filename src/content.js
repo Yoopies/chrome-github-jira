@@ -130,7 +130,7 @@ function headerBlock(issueKey,
     const statusIconHTML = statusIconBlock(statusIcon)
     const { color: statusColor, background: statusBackground } = statusCategoryColors(statusCategory);
     return `
-        <div class="TableObject gh-header-meta">
+        <div class="TableObject">
             <div class="TableObject-item">
                 <span class="State State--green" style="background-color: rgb(150, 198, 222);">
                     <img height="16" class="octicon" width="12" aria-hidden="true" src="${jiraLogo}"/>
@@ -182,34 +182,18 @@ async function main(items) {
     );
 
     if (jiraUrl == '') {
-        console.error('GitHub Jira plugin could not load: Jira URL is not set.');
+        console.error('GitHub Jira plugin could not load: Jira URL is not set. Please set the correct Jira URL in the options page.');
         return;
     }
 
-    //Check login
     try {
+        // Checks the login
         const { name } = await sendMessage({ query: 'getSession', jiraUrl });
 
-        var observer = new MutationObserver(function(mutations) {
-            mutations.forEach(function(mutation) {
-                // Check page if content changed (for AJAX pages)
-                if (mutation.type !== 'attributes') {
-                    return; // just skip
-                }
+        // Hook into the turbo render event, for subsequent navigation
+        document.addEventListener('turbo:render', checkPage, { passive: true });
 
-                if ((new Date()).getTime() - lastRefresh >= REFRESH_TIMEOUT) {
-                    lastRefresh = (new Date()).getTime();
-                    checkPage();
-                }
-            });
-        });
-
-        var observerConfig = { attributes: true, childList: true, characterData: true, subtree: true };
-        var targetNode = document.body;
-
-        observer.observe(targetNode, observerConfig);
-
-        // Check page initially
+        // Check page initially (on first load)
         checkPage();
     } catch(e) {
         console.error(`You are not logged in to Jira at ${jiraUrl} - Please login.`);
@@ -351,6 +335,7 @@ function onPageChange(page) {
 
 function checkPage() {
     let url = window.location.href;
+    console.log(url);
     if (url.match(GITHUB_PAGE_PULL) != null) {
         onPageChange(PAGE_PR)
     }
@@ -477,9 +462,9 @@ async function handlePrsPage() {
 }
 
 async function handlePrPage() {
-    const titleEl = document.querySelector('h1 > .js-issue-title');
+    const titleEl = document.querySelector('h1 > span.markdown-title');
     const insertedJiraDataEl = document.querySelector('#insertedJiraData');
-    const partialDiscussionHeaderEl = document.querySelector('#partial-discussion-header');
+    const pageHeaderDescriptionEl = document.querySelector('[class^="prc-PageHeader-Description"]');
     if (!titleEl || insertedJiraDataEl) {
         //If we didn't find a ticket, or the data is already inserted, cancel.
         return false;
@@ -498,7 +483,7 @@ async function handlePrPage() {
 
     //Open up a handle for data
     const loadingElement = buildLoadingElement(ticketNumber);
-    partialDiscussionHeaderEl.appendChild(loadingElement);
+    pageHeaderDescriptionEl.appendChild(loadingElement);
 
     //Load up data from jira
     try {
