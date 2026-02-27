@@ -222,6 +222,112 @@ function getJiraUrl(route = '') {
     return `https://${jiraUrl}/browse/${route}`
 }
 
+/**
+ * Génère une couleur basée sur le hash du nom du label
+ * pour assurer une couleur cohérente et unique par label
+ */
+function getLabelColor(labelName) {
+    // Couleurs personnalisées pour certains labels spécifiques (optionnel)
+    const customColors = {
+        'Backend': '#0e8a16',
+        'Frontend': '#a2eeef',
+        'Sentry': '#b60205',
+    };
+
+    // Si une couleur personnalisée existe, l'utiliser
+    if (customColors[labelName]) {
+        return customColors[labelName];
+    }
+
+    // Sinon, générer une couleur basée sur le hash du nom
+    let hash = 0;
+    for (let i = 0; i < labelName.length; i++) {
+        hash = labelName.charCodeAt(i) + ((hash << 5) - hash);
+        hash = hash & hash; // Convert to 32bit integer
+    }
+
+    // Générer une couleur HSL avec une saturation et luminosité agréables
+    const hue = Math.abs(hash % 360);
+    const saturation = 65 + (Math.abs(hash) % 20); // 65-85%
+    const lightness = 40 + (Math.abs(hash >> 8) % 15); // 40-55%
+
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+}
+
+/**
+ * Obtient la couleur pour un type de ticket Jira
+ */
+function getIssueTypeColor(issueTypeName) {
+    const typeColors = {
+        'Bug': '#d73a4a',
+        'Task': '#0075ca',
+        'Story': '#0e8a16',
+        'Epic': '#5319e7',
+        'Sub-task': '#fbca04',
+        'Tech': '#1d76db',
+        'Improvement': '#2ea44f',
+        'Feature': '#2ea44f',
+    };
+
+    return typeColors[issueTypeName] || '#6a737d';
+}
+
+/**
+ * Crée un élément label pour affichage
+ */
+function createLabelElement(labelText, ticketNumber, isIssueType = false) {
+    const labelEl = document.createElement('span');
+    const bgColor = isIssueType ? getIssueTypeColor(labelText) : getLabelColor(labelText);
+    const textColor = getContrastColor(bgColor);
+
+    labelEl.className = 'IssueLabel hx_IssueLabel';
+    labelEl.style.backgroundColor = bgColor;
+    labelEl.style.color = textColor;
+    labelEl.style.borderRadius = '2em';
+    labelEl.style.padding = '0 7px';
+    labelEl.style.fontSize = '12px';
+    labelEl.style.fontWeight = '500';
+    labelEl.style.lineHeight = '18px';
+    labelEl.style.display = 'inline-block';
+    labelEl.style.whiteSpace = 'nowrap';
+    labelEl.style.cursor = 'pointer';
+    labelEl.title = isIssueType ? `Jira type: ${labelText}` : `Jira label: ${labelText}`;
+    labelEl.innerHTML = `<img src="${jiraLogo}" alt="Jira" style="width: 12px; height: 12px; vertical-align: middle; margin-right: 2px;"/> ${labelText}`;
+
+    // Rendre le label cliquable
+    labelEl.onclick = () => {
+        window.open(getJiraUrl(ticketNumber), '_blank');
+    };
+
+    return labelEl;
+}
+
+/**
+ * Calcule la luminosité d'une couleur pour déterminer si le texte doit être blanc ou noir
+ */
+function getContrastColor(color) {
+    // Si c'est une couleur HSL
+    if (color.startsWith('hsl')) {
+        const matches = color.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+        if (matches) {
+            const lightness = parseInt(matches[3]);
+            return lightness > 60 ? '#000000' : '#ffffff';
+        }
+    }
+
+    // Si c'est une couleur hex
+    if (color.startsWith('#')) {
+        const hex = color.replace('#', '');
+        const r = parseInt(hex.substr(0, 2), 16);
+        const g = parseInt(hex.substr(2, 2), 16);
+        const b = parseInt(hex.substr(4, 2), 16);
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        return luminance > 0.5 ? '#000000' : '#ffffff';
+    }
+
+    return '#ffffff'; // Par défaut, texte blanc
+}
+
 async function syncStorage(data) {
     return new Promise((resolve, reject) => {
         chrome.storage.sync.get(data, resolve);
@@ -250,7 +356,7 @@ function checkPage() {
     }
 
     if (url.match(GITHUB_PAGE_PULLS) != null) {
-        //@todo PR overview page
+        handlePrsPage()
     }
 
     if (url.match(GITHUB_PAGE_COMPARE) != null) {
@@ -276,6 +382,98 @@ function handleCommitsTitle() {
         el.innerHTML = '';
         el.appendChild(contentEl);
     });
+}
+
+async function handlePrsPage() {
+    // Sélectionner toutes les lignes de PR qui n'ont pas encore été traitées
+    const prRows = document.querySelectorAll('div.js-issue-row:not([data-jira-processed])');
+
+    console.log("handlePrsPage");
+    console.log(prRows);
+    for (const row of prRows) {
+        // Vérifier d'abord si les labels Jira existent déjà (double protection)
+        if (row.querySelector('.jira-labels-inline')) {
+            row.setAttribute('data-jira-processed', 'true');
+            continue;
+        }
+
+        // Trouver le titre de la PR
+        const titleLink = row.querySelector('a.Link--primary');
+        if (!titleLink) {
+            continue;
+        }
+
+        const title = titleLink.innerText;
+
+        // Extraire le numéro de ticket Jira du titre
+        const ticketMatch = title.match(/([A-Z0-9]+-[0-9]+)/);
+        if (!ticketMatch) {
+            // Marquer comme traité même sans ticket Jira
+            row.setAttribute('data-jira-processed', 'true');
+            continue;
+        }
+
+        const ticketNumber = ticketMatch[0];
+
+        // Marquer comme traité IMMÉDIATEMENT pour éviter les traitements parallèles
+        row.setAttribute('data-jira-processed', 'true');
+
+        try {
+            // Récupérer les informations du ticket depuis Jira
+            const result = await sendMessage({ query: 'getTicketInfo', jiraUrl, ticketNumber });
+            if (result.errors) {
+                console.error('Error fetching ticket info:', result.errorMessages);
+                continue;
+            }
+
+            const { fields } = result;
+
+            // Chercher le conteneur du titre pour y insérer les labels juste après
+            const titleContainer = titleLink.parentElement;
+            if (!titleContainer) {
+                continue;
+            }
+
+            // Double vérification : si les labels ont déjà été ajoutés par un appel parallèle, on arrête
+            if (titleContainer.querySelector('.jira-labels-inline')) {
+                console.log('Labels already added for', ticketNumber);
+                continue;
+            }
+
+            // Créer un conteneur pour les labels Jira
+            const jiraLabelsContainer = document.createElement('span');
+            jiraLabelsContainer.className = 'jira-labels-inline';
+            jiraLabelsContainer.style.marginLeft = '8px';
+            jiraLabelsContainer.style.display = 'inline-flex';
+            jiraLabelsContainer.style.gap = '4px';
+            jiraLabelsContainer.style.flexWrap = 'wrap';
+            jiraLabelsContainer.style.alignItems = 'center';
+
+            // Ajouter le type de ticket en premier
+            if (fields?.issuetype?.name) {
+                const issueTypeLabel = createLabelElement(fields.issuetype.name, ticketNumber, true);
+                jiraLabelsContainer.appendChild(issueTypeLabel);
+            }
+
+            // Filtrer les labels pour exclure "Symfony" et "Nuxt"
+            const excludedLabels = ['Symfony', 'Nuxt'];
+            const filteredLabels = fields.labels?.filter(label => !excludedLabels.includes(label)) || [];
+
+            // Ajouter chaque label
+            filteredLabels.forEach(label => {
+                const labelEl = createLabelElement(label, ticketNumber, false);
+                jiraLabelsContainer.appendChild(labelEl);
+            });
+
+            // Insérer les labels Jira après le titre (seulement si au moins un label existe)
+            if (jiraLabelsContainer.children.length > 0) {
+                titleLink.parentElement.appendChild(jiraLabelsContainer);
+            }
+
+        } catch(e) {
+            console.error('Error processing PR row:', e);
+        }
+    }
 }
 
 async function handlePrPage() {
